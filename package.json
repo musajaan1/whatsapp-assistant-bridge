@@ -1,0 +1,26 @@
+{
+  "name": "whatsapp-personal-assistant-bridge",
+  "version": "1.0.0",
+  "description": "WhatsApp Personal Assistant Bridge with Gemini AI and Windows local file search",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test:gemini": "node tests/test-gemini.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "gemini",
+    "personal-assistant",
+    "bridge",
+    "ai"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "fast-glob": "^3.3.3"
+  }
+}
