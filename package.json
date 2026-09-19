@@ -6,7 +6,8 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test:gemini": "node tests/test-gemini.js"
+    "test:gemini": "node tests/test-gemini.js",
+    "test:file-search": "node tests/test-file-search.js"
   },
   "keywords": [
     "whatsapp",
