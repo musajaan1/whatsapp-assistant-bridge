@@ -18,6 +18,29 @@ function getClient() {
 }
 
 /**
+ * Checks if an error is caused by Gemini rate-limits, quota exhaustion, or API unavailability.
+ * @param {Error | any} err 
+ * @returns {boolean}
+ */
+export function isGeminiQuotaError(err) {
+  if (!err) return false;
+  const msg = (err.message || "").toLowerCase();
+  const status = err.status || err.statusCode;
+  return (
+    status === 429 ||
+    status === 503 ||
+    msg.includes("429") ||
+    msg.includes("quota") ||
+    msg.includes("resource_exhausted") ||
+    msg.includes("rate limit") ||
+    msg.includes("too many requests") ||
+    msg.includes("perday") ||
+    msg.includes("daily") ||
+    msg.includes("service unavailable")
+  );
+}
+
+/**
  * Executes an async Gemini API call with exponential backoff on 429 (rate-limit) errors.
  * @template T
  * @param {() => Promise<T>} fn 
@@ -25,21 +48,26 @@ function getClient() {
  * @param {number} [baseDelayMs=3000] 
  * @returns {Promise<T>}
  */
-async function callWithRetry(fn, maxRetries = 4, baseDelayMs = 5000) {
+async function callWithRetry(fn, maxRetries = 3, baseDelayMs = 4000) {
   let lastError;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
     } catch (err) {
       lastError = err;
-      const isRateLimit =
-        err?.status === 429 ||
-        err?.message?.includes("429") ||
-        err?.message?.includes("quota") ||
-        err?.message?.includes("RESOURCE_EXHAUSTED");
+      const isRateLimit = isGeminiQuotaError(err);
+      const isDailyQuota =
+        err?.message?.includes("PerDay") ||
+        err?.message?.includes("per day") ||
+        err?.message?.includes("Daily");
+
+      if (isDailyQuota) {
+        // Daily quota limit cannot be resolved by backoff, throw immediately
+        throw err;
+      }
 
       if (isRateLimit && attempt < maxRetries) {
-        const delay = Math.max(baseDelayMs * Math.pow(1.5, attempt), 7000);
+        const delay = Math.max(baseDelayMs * Math.pow(1.5, attempt), 5000);
         console.warn(`[GeminiService] Rate limit hit. Waiting ${(delay / 1000).toFixed(1)}s before retry (attempt ${attempt + 1}/${maxRetries})...`);
         await new Promise((res) => setTimeout(res, delay));
         continue;

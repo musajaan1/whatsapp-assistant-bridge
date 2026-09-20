@@ -20,6 +20,10 @@ const IGNORED_DIRECTORIES = new Set([
   ".vscode",
   "temp",
   "tmp",
+  "merged_partition_content",
+  "softwears",
+  "software",
+  "softwares",
 ]);
 
 /**
@@ -74,13 +78,53 @@ const STOPWORDS = new Set([
 ]);
 
 /**
- * Normalizes text for comparison (NFC unicode normalization, lowercased, trimmed).
- * Crucial for Urdu, Arabic, and Unicode script matching.
+ * Urdu and Arabic diacritics regex (harakat / aerab / tashkeel):
+ * - \u064B-\u065F: Fathatan, Dammatan, Kasratan, Fatha (Zabar), Damma (Pesh), Kasra (Zer), Shaddah, Sukun, etc.
+ * - \u0670: Superscript Alef (Khara Zabar)
+ * - \u06D6-\u06ED: Quranic / additional Arabic diacritical marks
+ */
+export const DIACRITICS_REGEX = /[\u064B-\u065F\u0670\u06D6-\u06ED]/g;
+
+/**
+ * Strips Arabic and Urdu diacritics (zabar, zer, pesh, jazm, tashdeed) for reliable text matching.
  * @param {string} str 
  * @returns {string}
  */
-function normalizeText(str) {
-  return (str || "").normalize("NFC").toLowerCase().trim();
+export function stripDiacritics(str) {
+  if (!str) return "";
+  return str
+    .normalize("NFD")
+    .replace(DIACRITICS_REGEX, "")
+    .normalize("NFC");
+}
+
+/**
+ * Normalizes text for comparison (strips diacritics, lowercased, trimmed).
+ * Crucial for Urdu, Arabic, and Unicode script matching across filenames and queries.
+ * @param {string} str 
+ * @returns {string}
+ */
+export function normalizeText(str) {
+  return stripDiacritics(str).toLowerCase().trim();
+}
+
+/**
+ * Builds a regular expression that matches a search query while ignoring diacritics in the target text.
+ * @param {string} query 
+ * @returns {RegExp}
+ */
+export function buildDiacriticRegex(query) {
+  const diacriticClass = "[\\u064B-\\u065F\\u0670\\u06D6-\\u06ED]*";
+  const clean = stripDiacritics(query);
+  const pattern = clean
+    .split("")
+    .map((char) => {
+      if (/\s/.test(char)) return "\\s+";
+      const escaped = char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return escaped + diacriticClass;
+    })
+    .join("");
+  return new RegExp(pattern, "i");
 }
 
 /**
@@ -319,42 +363,63 @@ const SUPPORTED_CONTENT_EXTENSIONS = new Set([".docx", ".doc", ".txt"]);
 
 /**
  * Extracts a surrounding snippet of ~100 characters before and after the keyword.
+ * Uses diacritic-insensitive matching.
+ * 
  * @param {string} text 
  * @param {string} keyword 
- * @returns {string | null}
+ * @returns {{snippet: string, isExact: boolean} | null}
  */
-function extractSnippet(text, keyword) {
+export function extractSnippet(text, keyword) {
   if (!text || !keyword) return null;
 
-  const normText = text.normalize("NFC");
-  const normKeyword = keyword.normalize("NFC");
-  const lowerText = normText.toLowerCase();
-  const lowerKeyword = normKeyword.toLowerCase();
+  // 1. Primary: match exact phrase ignoring any diacritics
+  try {
+    const regex = buildDiacriticRegex(keyword);
+    const match = regex.exec(text);
 
-  const idx = lowerText.indexOf(lowerKeyword);
-  if (idx === -1) {
-    // If multi-word, try searching first content token
-    const tokens = lowerKeyword.split(/\s+/).filter((t) => !STOPWORDS.has(t));
-    if (tokens.length > 0) {
-      const tokenIdx = lowerText.indexOf(tokens[0]);
-      if (tokenIdx !== -1) {
-        const start = Math.max(0, tokenIdx - 80);
-        const end = Math.min(normText.length, tokenIdx + tokens[0].length + 80);
-        let snippet = normText.substring(start, end).replace(/\s+/g, " ").trim();
-        if (start > 0) snippet = "..." + snippet;
-        if (end < normText.length) snippet = snippet + "...";
-        return snippet;
-      }
+    if (match) {
+      const idx = match.index;
+      const matchLen = match[0].length;
+      const start = Math.max(0, idx - 100);
+      const end = Math.min(text.length, idx + matchLen + 100);
+      let snippet = text.substring(start, end).replace(/\s+/g, " ").trim();
+      if (start > 0) snippet = "..." + snippet;
+      if (end < text.length) snippet = snippet + "...";
+      return { snippet, isExact: true };
     }
-    return null;
+  } catch {
+    // Fallback if regex fails on unusual input
   }
 
-  const start = Math.max(0, idx - 100);
-  const end = Math.min(normText.length, idx + keyword.length + 100);
-  let snippet = normText.substring(start, end).replace(/\s+/g, " ").trim();
-  if (start > 0) snippet = "..." + snippet;
-  if (end < normText.length) snippet = snippet + "...";
-  return snippet;
+  // 2. Multi-word fallback: ALL non-stopword tokens must be present in the document
+  const normKeyword = normalizeText(keyword);
+  const tokens = normKeyword.split(/\s+/).filter((t) => !STOPWORDS.has(t) && t.length > 1);
+  if (tokens.length > 1) {
+    const matches = [];
+    for (const token of tokens) {
+      try {
+        const tokenRegex = buildDiacriticRegex(token);
+        const tokenMatch = tokenRegex.exec(text);
+        if (!tokenMatch) return null; // If ANY required token is missing, reject document
+        matches.push(tokenMatch);
+      } catch {
+        return null;
+      }
+    }
+
+    // All tokens are present! Build snippet around the first token found
+    const firstMatch = matches[0];
+    const idx = firstMatch.index;
+    const matchLen = firstMatch[0].length;
+    const start = Math.max(0, idx - 80);
+    const end = Math.min(text.length, idx + matchLen + 80);
+    let snippet = text.substring(start, end).replace(/\s+/g, " ").trim();
+    if (start > 0) snippet = "..." + snippet;
+    if (end < text.length) snippet = snippet + "...";
+    return { snippet, isExact: false };
+  }
+
+  return null;
 }
 
 /**
@@ -393,9 +458,23 @@ async function extractTextFromFile(filePath, ext) {
  * @param {number} maxResults 
  * @param {number} maxDepth 
  * @param {number} currentDepth 
+ * @param {number} startTime
  */
-async function crawlDirectoryContents(dirPath, keyword, resultsCollector, maxResults = 5, maxDepth = 8, currentDepth = 0) {
-  if (currentDepth > maxDepth || resultsCollector.length >= maxResults) {
+async function crawlDirectoryContents(
+  dirPath,
+  keyword,
+  resultsCollector,
+  maxResults = 5,
+  maxDepth = 5,
+  currentDepth = 0,
+  startTime = Date.now()
+) {
+  // Stop if reached max depth, max exact results, or search timeout (15s)
+  if (
+    currentDepth > maxDepth ||
+    resultsCollector.filter((m) => m.isExact).length >= maxResults ||
+    Date.now() - startTime > 15000
+  ) {
     return;
   }
 
@@ -409,7 +488,7 @@ async function crawlDirectoryContents(dirPath, keyword, resultsCollector, maxRes
   const subDirs = [];
 
   for (const entry of entries) {
-    if (resultsCollector.length >= maxResults) break;
+    if (resultsCollector.filter((m) => m.isExact).length >= maxResults) break;
 
     const entryName = entry.name;
     const lowerName = entryName.toLowerCase();
@@ -431,14 +510,15 @@ async function crawlDirectoryContents(dirPath, keyword, resultsCollector, maxRes
           }
 
           const text = await extractTextFromFile(fullPath, ext);
-          const snippet = extractSnippet(text, keyword);
+          const matchResult = extractSnippet(text, keyword);
 
-          if (snippet) {
+          if (matchResult) {
             const maxSizeBytes = getMaxFileSizeMb() * 1024 * 1024;
             resultsCollector.push({
               path: fullPath,
               filename: entryName,
-              snippet,
+              snippet: matchResult.snippet,
+              isExact: matchResult.isExact,
               sizeBytes: stats.size,
               sizeFormatted: formatFileSize(stats.size),
               modifiedDate: stats.mtime.toISOString(),
@@ -446,7 +526,7 @@ async function crawlDirectoryContents(dirPath, keyword, resultsCollector, maxRes
               maxSizeMb: getMaxFileSizeMb(),
             });
 
-            if (resultsCollector.length >= maxResults) {
+            if (resultsCollector.filter((m) => m.isExact).length >= maxResults) {
               return;
             }
           }
@@ -457,9 +537,39 @@ async function crawlDirectoryContents(dirPath, keyword, resultsCollector, maxRes
     }
   }
 
+  // Sort subdirectories: prioritize folders by year number descending, then by modification time
+  subDirs.sort((a, b) => {
+    const nameA = path.basename(a);
+    const nameB = path.basename(b);
+    const matchA = nameA.match(/(20\d\d)/);
+    const matchB = nameB.match(/(20\d\d)/);
+    const yearA = matchA ? parseInt(matchA[1], 10) : 0;
+    const yearB = matchB ? parseInt(matchB[1], 10) : 0;
+    if (yearA !== yearB) return yearB - yearA;
+    try {
+      return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs;
+    } catch {
+      return 0;
+    }
+  });
+
   for (const subDir of subDirs) {
-    if (resultsCollector.length >= maxResults) break;
-    await crawlDirectoryContents(subDir, keyword, resultsCollector, maxResults, maxDepth, currentDepth + 1);
+    if (
+      resultsCollector.filter((m) => m.isExact).length >= maxResults ||
+      Date.now() - startTime > 15000 ||
+      (currentDepth === 0 && resultsCollector.filter((m) => m.isExact).length >= 2)
+    ) {
+      break;
+    }
+    await crawlDirectoryContents(
+      subDir,
+      keyword,
+      resultsCollector,
+      maxResults,
+      maxDepth,
+      currentDepth + 1,
+      startTime
+    );
   }
 }
 
@@ -521,10 +631,21 @@ export async function searchFileContents(keyword, preferredDrive = null) {
     }
   }
 
+  // Sort matches:
+  // 1. Exact phrase matches first
+  // 2. Most recent modification date
+  collected.sort((a, b) => {
+    if (a.isExact && !b.isExact) return -1;
+    if (!a.isExact && b.isExact) return 1;
+    return new Date(b.modifiedDate).getTime() - new Date(a.modifiedDate).getTime();
+  });
+
+  const topMatches = collected.slice(0, 5);
+
   return {
     success: true,
     keyword,
-    count: collected.length,
-    matches: collected,
+    count: topMatches.length,
+    matches: topMatches,
   };
 }

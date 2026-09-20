@@ -1,6 +1,14 @@
-import { classifyIntent, generateReply, extractFileNameFromRequest, extractSearchKeyword } from "../services/gemini-service.js";
+import {
+  classifyIntent,
+  generateReply,
+  extractFileNameFromRequest,
+  extractSearchKeyword,
+  isGeminiQuotaError,
+} from "../services/gemini-service.js";
 import { searchFiles, searchFileContents } from "../services/file-search-service.js";
 import { logger } from "../services/logger-service.js";
+
+const GEMINI_BUSY_MESSAGE = "معذرت، فی الحال سسٹم مصروف ہے، تھوڑی دیر بعد کوشش کریں۔";
 
 // Multi-turn session state for pending file selections keyed by user ID
 const userSessions = new Map();
@@ -134,8 +142,15 @@ export async function routeIncomingMessage(message, adapter) {
     classification = await classifyIntent(text);
   } catch (err) {
     logger.error(`[MessageRouter] Intent classification error: ${err.message}`);
-    // Fallback: treat as general chat
-    classification = { intent: "GENERAL_CHAT", confidence: 0.5, reasoning: "Fallback due to classification error" };
+    if (isGeminiQuotaError(err)) {
+      await adapter.sendTextMessage(fromId, GEMINI_BUSY_MESSAGE);
+      return;
+    }
+    await adapter.sendTextMessage(
+      fromId,
+      "معذرت، سسٹم میں خرابی پیش آئی ہے۔ براہ کرم کچھ دیر بعد دوبارہ کوشش کریں۔"
+    );
+    return;
   }
 
   logger.logIntent({
@@ -155,6 +170,10 @@ export async function routeIncomingMessage(message, adapter) {
       params = await extractFileNameFromRequest(text);
     } catch (err) {
       logger.error(`[MessageRouter] Extraction error: ${err.message}`);
+      if (isGeminiQuotaError(err)) {
+        await adapter.sendTextMessage(fromId, GEMINI_BUSY_MESSAGE);
+        return;
+      }
       params = { keyword: text, drive: null, fileExtension: null };
     }
 
@@ -232,6 +251,10 @@ export async function routeIncomingMessage(message, adapter) {
       params = await extractSearchKeyword(text);
     } catch (err) {
       logger.error(`[MessageRouter] Keyword extraction error: ${err.message}`);
+      if (isGeminiQuotaError(err)) {
+        await adapter.sendTextMessage(fromId, GEMINI_BUSY_MESSAGE);
+        return;
+      }
       params = { keyword: text, drive: null };
     }
 
@@ -281,6 +304,10 @@ export async function routeIncomingMessage(message, adapter) {
     await adapter.sendTextMessage(fromId, reply);
   } catch (err) {
     logger.error(`[MessageRouter] Error generating reply: ${err.message}`);
+    if (isGeminiQuotaError(err)) {
+      await adapter.sendTextMessage(fromId, GEMINI_BUSY_MESSAGE);
+      return;
+    }
     await adapter.sendTextMessage(
       fromId,
       "معذرت، اس وقت جواب تیار کرنے میں دشواری پیش آ رہی ہے۔ براہ کرم کچھ دیر بعد دوبارہ کوشش کریں۔"
