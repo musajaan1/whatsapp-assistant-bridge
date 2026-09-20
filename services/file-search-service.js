@@ -306,3 +306,225 @@ export async function searchFiles(keyword, preferredDrive = null) {
     matches: topMatches,
   };
 }
+
+/**
+ * Maximum file size in MB to read and parse for content search.
+ */
+const MAX_CONTENT_SCAN_SIZE_MB = 20;
+
+/**
+ * Supported file extensions for content scanning.
+ */
+const SUPPORTED_CONTENT_EXTENSIONS = new Set([".docx", ".doc", ".txt"]);
+
+/**
+ * Extracts a surrounding snippet of ~100 characters before and after the keyword.
+ * @param {string} text 
+ * @param {string} keyword 
+ * @returns {string | null}
+ */
+function extractSnippet(text, keyword) {
+  if (!text || !keyword) return null;
+
+  const normText = text.normalize("NFC");
+  const normKeyword = keyword.normalize("NFC");
+  const lowerText = normText.toLowerCase();
+  const lowerKeyword = normKeyword.toLowerCase();
+
+  const idx = lowerText.indexOf(lowerKeyword);
+  if (idx === -1) {
+    // If multi-word, try searching first content token
+    const tokens = lowerKeyword.split(/\s+/).filter((t) => !STOPWORDS.has(t));
+    if (tokens.length > 0) {
+      const tokenIdx = lowerText.indexOf(tokens[0]);
+      if (tokenIdx !== -1) {
+        const start = Math.max(0, tokenIdx - 80);
+        const end = Math.min(normText.length, tokenIdx + tokens[0].length + 80);
+        let snippet = normText.substring(start, end).replace(/\s+/g, " ").trim();
+        if (start > 0) snippet = "..." + snippet;
+        if (end < normText.length) snippet = snippet + "...";
+        return snippet;
+      }
+    }
+    return null;
+  }
+
+  const start = Math.max(0, idx - 100);
+  const end = Math.min(normText.length, idx + keyword.length + 100);
+  let snippet = normText.substring(start, end).replace(/\s+/g, " ").trim();
+  if (start > 0) snippet = "..." + snippet;
+  if (end < normText.length) snippet = snippet + "...";
+  return snippet;
+}
+
+/**
+ * Extracts plain text from .docx, .doc, or .txt file.
+ * @param {string} filePath 
+ * @param {string} ext 
+ * @returns {Promise<string>}
+ */
+async function extractTextFromFile(filePath, ext) {
+  try {
+    if (ext === ".txt") {
+      return await fs.promises.readFile(filePath, "utf8");
+    }
+    if (ext === ".docx") {
+      const mammoth = (await import("mammoth")).default;
+      const result = await mammoth.extractRawText({ path: filePath });
+      return result.value || "";
+    }
+    if (ext === ".doc") {
+      const WordExtractor = (await import("word-extractor")).default;
+      const extractor = new WordExtractor();
+      const extracted = await extractor.extract(filePath);
+      return extracted.getBody() || "";
+    }
+  } catch (err) {
+    // Corrupted, locked, or unreadable document
+  }
+  return "";
+}
+
+/**
+ * Recursively crawls directory searching within the contents of Word and text files.
+ * @param {string} dirPath 
+ * @param {string} keyword 
+ * @param {Array<Object>} resultsCollector 
+ * @param {number} maxResults 
+ * @param {number} maxDepth 
+ * @param {number} currentDepth 
+ */
+async function crawlDirectoryContents(dirPath, keyword, resultsCollector, maxResults = 5, maxDepth = 8, currentDepth = 0) {
+  if (currentDepth > maxDepth || resultsCollector.length >= maxResults) {
+    return;
+  }
+
+  let entries;
+  try {
+    entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  const subDirs = [];
+
+  for (const entry of entries) {
+    if (resultsCollector.length >= maxResults) break;
+
+    const entryName = entry.name;
+    const lowerName = entryName.toLowerCase();
+
+    if (entry.isDirectory()) {
+      if (!IGNORED_DIRECTORIES.has(lowerName) && !entryName.startsWith(".")) {
+        subDirs.push(path.join(dirPath, entryName));
+      }
+    } else if (entry.isFile()) {
+      const ext = path.extname(entryName).toLowerCase();
+      if (SUPPORTED_CONTENT_EXTENSIONS.has(ext)) {
+        try {
+          const fullPath = path.join(dirPath, entryName);
+          const stats = await fs.promises.stat(fullPath);
+
+          // Skip files exceeding max content scan threshold
+          if (stats.size > MAX_CONTENT_SCAN_SIZE_MB * 1024 * 1024) {
+            continue;
+          }
+
+          const text = await extractTextFromFile(fullPath, ext);
+          const snippet = extractSnippet(text, keyword);
+
+          if (snippet) {
+            const maxSizeBytes = getMaxFileSizeMb() * 1024 * 1024;
+            resultsCollector.push({
+              path: fullPath,
+              filename: entryName,
+              snippet,
+              sizeBytes: stats.size,
+              sizeFormatted: formatFileSize(stats.size),
+              modifiedDate: stats.mtime.toISOString(),
+              isTooLarge: stats.size > maxSizeBytes,
+              maxSizeMb: getMaxFileSizeMb(),
+            });
+
+            if (resultsCollector.length >= maxResults) {
+              return;
+            }
+          }
+        } catch {
+          // Skip on stat/read error
+        }
+      }
+    }
+  }
+
+  for (const subDir of subDirs) {
+    if (resultsCollector.length >= maxResults) break;
+    await crawlDirectoryContents(subDir, keyword, resultsCollector, maxResults, maxDepth, currentDepth + 1);
+  }
+}
+
+/**
+ * Searches within the text contents of Word (.docx, .doc) and text (.txt) files.
+ * 
+ * @param {string} keyword - Word or phrase to find inside document contents
+ * @param {string} [preferredDrive] - Optional drive to prioritize
+ * @returns {Promise<{
+ *   success: boolean,
+ *   keyword: string,
+ *   count: number,
+ *   matches: Array<{
+ *     path: string,
+ *     filename: string,
+ *     snippet: string,
+ *     sizeBytes: number,
+ *     sizeFormatted: string,
+ *     modifiedDate: string,
+ *     isTooLarge: boolean,
+ *     maxSizeMb: number
+ *   }>
+ * }>}
+ */
+export async function searchFileContents(keyword, preferredDrive = null) {
+  if (!keyword || typeof keyword !== "string" || keyword.trim() === "") {
+    return { success: false, keyword: "", count: 0, matches: [], message: "Keyword must be a non-empty string." };
+  }
+
+  const rootFolders = getSearchRootFolders();
+  if (rootFolders.length === 0) {
+    return {
+      success: false,
+      keyword,
+      count: 0,
+      matches: [],
+      message: "No valid SEARCH_ROOT_FOLDERS configured.",
+    };
+  }
+
+  let orderedRoots = [...rootFolders];
+  if (preferredDrive && typeof preferredDrive === "string") {
+    const cleanDrive = preferredDrive.replace(/\\|\//g, "").toUpperCase();
+    orderedRoots.sort((a, b) => {
+      const aRoot = path.parse(a).root.replace(/\\|\//g, "").toUpperCase();
+      const bRoot = path.parse(b).root.replace(/\\|\//g, "").toUpperCase();
+      if (aRoot === cleanDrive && bRoot !== cleanDrive) return -1;
+      if (bRoot === cleanDrive && aRoot !== cleanDrive) return 1;
+      return 0;
+    });
+  }
+
+  const collected = [];
+
+  for (const root of orderedRoots) {
+    await crawlDirectoryContents(root, keyword, collected, 5);
+    if (collected.length >= 5) {
+      break;
+    }
+  }
+
+  return {
+    success: true,
+    keyword,
+    count: collected.length,
+    matches: collected,
+  };
+}

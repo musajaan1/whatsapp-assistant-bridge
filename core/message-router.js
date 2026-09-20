@@ -1,5 +1,5 @@
-import { classifyIntent, generateReply, extractFileNameFromRequest } from "../services/gemini-service.js";
-import { searchFiles } from "../services/file-search-service.js";
+import { classifyIntent, generateReply, extractFileNameFromRequest, extractSearchKeyword } from "../services/gemini-service.js";
+import { searchFiles, searchFileContents } from "../services/file-search-service.js";
 import { logger } from "../services/logger-service.js";
 
 // Multi-turn session state for pending file selections keyed by user ID
@@ -222,7 +222,60 @@ export async function routeIncomingMessage(message, adapter) {
     return;
   }
 
-  // 5. GENERAL_CHAT or SUMMARIZE_REQUEST -> Natural Urdu reply from Gemini
+  // 5. CONTENT_SEARCH_REQUEST -> Deep search inside Word (.docx, .doc) and text (.txt) files
+  if (classification.intent === "CONTENT_SEARCH_REQUEST") {
+    // Send immediate intermediate notification
+    await adapter.sendTextMessage(fromId, "تلاش جاری ہے، براہ کرم انتظار کریں...");
+
+    let params;
+    try {
+      params = await extractSearchKeyword(text);
+    } catch (err) {
+      logger.error(`[MessageRouter] Keyword extraction error: ${err.message}`);
+      params = { keyword: text, drive: null };
+    }
+
+    const keyword = params.keyword || text;
+    const drive = params.drive || null;
+
+    logger.info(`[MessageRouter] Searching file contents for: "${keyword}" (Drive: ${drive || "All"})...`);
+    const searchResult = await searchFileContents(keyword, drive);
+
+    logger.logSearch({
+      from: fromId,
+      keyword,
+      drive,
+      resultCount: searchResult.count,
+      matches: searchResult.matches.map((m) => ({ name: m.filename, size: m.sizeFormatted })),
+    });
+
+    if (searchResult.count === 0) {
+      await adapter.sendTextMessage(
+        fromId,
+        `معذرت، کمپیوٹر کی ورڈ یا ٹیکسٹ فائلوں میں "${keyword}" کا متن نہیں مل سکا۔`
+      );
+      return;
+    }
+
+    // Save matches in session so user can reply with number to fetch file
+    userSessions.set(fromId, {
+      pendingMatches: searchResult.matches,
+      timestamp: Date.now(),
+    });
+
+    let listPrompt = `آپ کے مطلوبہ متن کے حامل ${searchResult.count} دستاویزات مل گئے ہیں:\n\n`;
+    searchResult.matches.forEach((file, idx) => {
+      listPrompt += `*${idx + 1}.* 📄 ${file.filename} (${file.sizeFormatted})\n`;
+      listPrompt += `   *اقتباس:* "${file.snippet}"\n`;
+      listPrompt += `   *راستہ:* \`${file.path}\`\n\n`;
+    });
+
+    listPrompt += `جس فائل کو حاصل کرنا چاہتے ہیں، اس کا *نمبر* لکھ کر بھیجیں۔`;
+    await adapter.sendTextMessage(fromId, listPrompt.trim());
+    return;
+  }
+
+  // 6. GENERAL_CHAT or SUMMARIZE_REQUEST -> Natural Urdu reply from Gemini
   try {
     const reply = await generateReply(text);
     await adapter.sendTextMessage(fromId, reply);

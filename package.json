@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node index.js",
     "test:gemini": "node tests/test-gemini.js",
-    "test:file-search": "node tests/test-file-search.js"
+    "test:file-search": "node tests/test-file-search.js",
+    "test:content-search": "node tests/test-content-search.js"
   },
   "keywords": [
     "whatsapp",
@@ -22,6 +23,8 @@
     "@google/generative-ai": "^0.24.1",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "fast-glob": "^3.3.3"
+    "fast-glob": "^3.3.3",
+    "mammoth": "^1.12.3",
+    "word-extractor": "^1.0.4"
   }
 }

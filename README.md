@@ -8,9 +8,9 @@ An automated Windows desktop bridge connecting **WhatsApp's "Connect your own ag
 
 1. **Intelligent Urdu AI Chat & Summaries**:
    - Responds to greetings, general questions, advice, and text summarization requests in fluent, polite, natural Urdu script.
-2. **Local Windows Drive File Search**:
-   - Searches across configured local drives (`C:\`, `D:\`, `F:\`, etc.) using Urdu and English partial/fuzzy matching.
-   - Handles multi-word phrases (e.g. `"شوگر کا مجرب عمل"` or `"سالانہ بجٹ رپورٹ"`).
+2. **Local Windows Drive File Search (Filename & Content)**:
+   - **Filename Search**: Searches across local drives using Urdu and English partial/fuzzy matching (e.g. `"شوگر کا مجرب عمل"`).
+   - **Deep Content Search**: Reads inside Word documents (`.docx`, `.doc`) and plain text files (`.txt`) for specific phrases (e.g. `"کس فائل میں مُسکراتا میدان لکھا ہے"`), returning context preview snippets.
 3. **Direct WhatsApp File Delivery**:
    - Uploads and sends found files directly to your WhatsApp chat as document or image attachments.
    - If multiple matching files are found, presents a clean numbered list and waits for your number choice before sending.
@@ -135,6 +135,9 @@ pm2 save
 # Test Gemini AI classification and Urdu replies
 npm run test:gemini
 
-# Test local drive file search with custom keyword
+# Test local drive file search with custom keyword (by filename)
 npm run test:file-search "شوگر کا مجرب عمل"
+
+# Test deep content search inside Word (.docx, .doc) and text (.txt) files
+npm run test:content-search "مُسکراتا میدان"
 ```
